@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -13,22 +13,12 @@ from database import get_db
 from models import Lender, LenderProgram
 from schemas.lender import LenderCreate, LenderUpdate, ProgramCreate, LenderProgramUpdate
 from schemas.lender_criteria import snake_case_dict
+from utils.case import dict_keys_to_camel
 
 router = APIRouter(prefix="/api/lenders", tags=["lenders"])
 
-
-def _camel_case_dict(obj: Any) -> Any:
-    """Recursively convert dict keys from snake_case to camelCase for frontend."""
-    if isinstance(obj, dict):
-        return {_to_camel(k): _camel_case_dict(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_camel_case_dict(x) for x in obj]
-    return obj
-
-
-def _to_camel(s: str) -> str:
-    parts = s.split("_")
-    return parts[0].lower() + "".join(p.capitalize() for p in parts[1:])
+MSG_LENDER_NOT_FOUND = "Lender not found"
+MSG_PROGRAM_NOT_FOUND = "Program not found"
 
 
 def _program_to_response(p: LenderProgram) -> dict[str, Any]:
@@ -37,7 +27,7 @@ def _program_to_response(p: LenderProgram) -> dict[str, Any]:
         "name": p.name,
         "tier": p.tier,
         "description": p.description,
-        "criteria": _camel_case_dict(p.criteria or {}),
+        "criteria": dict_keys_to_camel(p.criteria or {}),
     }
 
 
@@ -71,7 +61,6 @@ def _slug_to_id(slug: str) -> str:
 def _suggest_from_filename(filename: str) -> tuple[str, str, str]:
     """From PDF filename suggest lender name, slug, and source document."""
     name = Path(filename).stem.strip()
-    # Clean name: remove extra spaces, replace + with space
     name = re.sub(r"\s+", " ", name.replace("+", " ").replace("++", " "))
     slug = re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug) or "lender"
@@ -105,7 +94,7 @@ async def parse_lender_pdf(file: UploadFile = File(..., description="Lender guid
         {
             "name": p["name"],
             "tier": p.get("tier"),
-            "criteria": _camel_case_dict(p["criteria"]),
+            "criteria": dict_keys_to_camel(p["criteria"]),
         }
         for p in programs_snake
     ]
@@ -131,19 +120,21 @@ async def get_lender(lender_id: str, db: AsyncSession = Depends(get_db)):
     )
     lender = result.scalar_one_or_none()
     if not lender:
-        raise HTTPException(status_code=404, detail="Lender not found")
+        raise HTTPException(status_code=404, detail=MSG_LENDER_NOT_FOUND)
     return _lender_to_response(lender)
 
 
 @router.post("", response_model=dict, status_code=201)
 async def create_lender(body: LenderCreate, db: AsyncSession = Depends(get_db)):
     lender_id = _slug_to_id(body.slug)
-    existing = await db.execute(select(Lender).where(Lender.id == lender_id))
-    if existing.scalar_one_or_none():
+    existing = await db.execute(
+        select(Lender).where(or_(Lender.id == lender_id, Lender.slug == body.slug))
+    )
+    found = existing.scalar_one_or_none()
+    if found:
+        if found.slug == body.slug:
+            raise HTTPException(status_code=400, detail="Slug already in use")
         lender_id = f"{lender_id}-{uuid.uuid4().hex[:6]}"
-    existing_slug = await db.execute(select(Lender).where(Lender.slug == body.slug))
-    if existing_slug.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Slug already in use")
     lender = Lender(
         id=lender_id,
         name=body.name,
@@ -178,7 +169,7 @@ async def update_lender(lender_id: str, body: LenderUpdate, db: AsyncSession = D
     )
     lender = result.scalar_one_or_none()
     if not lender:
-        raise HTTPException(status_code=404, detail="Lender not found")
+        raise HTTPException(status_code=404, detail=MSG_LENDER_NOT_FOUND)
     if body.name is not None:
         lender.name = body.name
     if body.slug is not None:
@@ -191,8 +182,6 @@ async def update_lender(lender_id: str, body: LenderUpdate, db: AsyncSession = D
     return _lender_to_response(lender)
 
 
-# --- Program endpoints (nested under lender) ---
-
 @router.post("/{lender_id}/programs", response_model=dict, status_code=201)
 async def create_program(lender_id: str, body: ProgramCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -200,7 +189,7 @@ async def create_program(lender_id: str, body: ProgramCreate, db: AsyncSession =
     )
     lender = result.scalar_one_or_none()
     if not lender:
-        raise HTTPException(status_code=404, detail="Lender not found")
+        raise HTTPException(status_code=404, detail=MSG_LENDER_NOT_FOUND)
     try:
         criteria = _normalize_criteria(body.criteria)
     except ValueError as e:
@@ -229,7 +218,7 @@ async def update_program(
     )
     prog = result.scalar_one_or_none()
     if not prog:
-        raise HTTPException(status_code=404, detail="Program not found")
+        raise HTTPException(status_code=404, detail=MSG_PROGRAM_NOT_FOUND)
     if body.name is not None:
         prog.name = body.name
     if body.tier is not None:
@@ -254,7 +243,7 @@ async def delete_program(lender_id: str, program_id: str, db: AsyncSession = Dep
     )
     prog = result.scalar_one_or_none()
     if not prog:
-        raise HTTPException(status_code=404, detail="Program not found")
+        raise HTTPException(status_code=404, detail=MSG_PROGRAM_NOT_FOUND)
     await db.delete(prog)
     await db.flush()
     return None

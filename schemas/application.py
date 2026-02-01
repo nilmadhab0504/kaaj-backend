@@ -6,11 +6,6 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-def _camel(s: str) -> str:
-    parts = s.split("_")
-    return parts[0] + "".join(p.capitalize() for p in parts[1:])
-
-
 class BusinessSchema(BaseModel):
     industry: str
     industry_code: Optional[str] = Field(None, alias="industryCode")
@@ -85,28 +80,3 @@ class ApplicationResponse(BaseModel):
 
     class Config:
         from_attributes = True
-
-    @classmethod
-    def from_orm_with_camel(cls, obj: Any) -> "ApplicationResponse":
-        """Map DB snake_case to frontend camelCase."""
-        def to_camel(d: dict | None) -> dict | None:
-            if d is None:
-                return None
-            out: dict = {}
-            for k, v in d.items():
-                parts = k.split("_")
-                new_k = parts[0] + "".join(p.capitalize() for p in parts[1:])
-                out[new_k] = v
-            return out
-
-        return cls(
-            id=obj.id,
-            status=obj.status,
-            business=to_camel(obj.business) or {},
-            guarantor=to_camel(obj.guarantor) or {},
-            business_credit=to_camel(obj.business_credit) if obj.business_credit else None,
-            loan_request=to_camel(obj.loan_request) or {},
-            created_at=obj.created_at,
-            updated_at=obj.updated_at,
-            submitted_at=obj.submitted_at,
-        )

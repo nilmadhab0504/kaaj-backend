@@ -3,8 +3,6 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
-from schemas.lender import LenderMatchResultSchema
-
 
 class UnderwritingRunResponse(BaseModel):
     id: str

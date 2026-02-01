@@ -9,21 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from models import LoanApplication
+from models import LoanApplication, UnderwritingRun
 from schemas.application import ApplicationCreate
+from utils.case import dict_keys_to_camel
 
 router = APIRouter(prefix="/api/applications", tags=["applications"])
-
-
-def _to_camel(d: dict | None) -> dict | None:
-    if d is None:
-        return None
-    out: dict = {}
-    for k, v in d.items():
-        parts = k.split("_")
-        new_k = parts[0] + "".join(p.capitalize() for p in parts[1:])
-        out[new_k] = v
-    return out
 
 
 def _app_to_response(app: LoanApplication) -> dict[str, Any]:
@@ -31,10 +21,10 @@ def _app_to_response(app: LoanApplication) -> dict[str, Any]:
     return {
         "id": app.id,
         "status": app.status,
-        "business": _to_camel(app.business) or {},
-        "guarantor": _to_camel(app.guarantor) or {},
-        "businessCredit": _to_camel(app.business_credit) if app.business_credit else None,
-        "loanRequest": _to_camel(app.loan_request) or {},
+        "business": dict_keys_to_camel(app.business) if app.business else {},
+        "guarantor": dict_keys_to_camel(app.guarantor) if app.guarantor else {},
+        "businessCredit": dict_keys_to_camel(app.business_credit) if app.business_credit else None,
+        "loanRequest": dict_keys_to_camel(app.loan_request) if app.loan_request else {},
         "createdAt": app.created_at.isoformat() if app.created_at else None,
         "updatedAt": app.updated_at.isoformat() if app.updated_at else None,
         "submittedAt": app.submitted_at.isoformat() if app.submitted_at else None,
@@ -91,7 +81,6 @@ async def submit_application(application_id: str, db: AsyncSession = Depends(get
 
 @router.get("/{application_id}/runs", response_model=list[dict])
 async def list_runs(application_id: str, db: AsyncSession = Depends(get_db)):
-    from models import UnderwritingRun
     result = await db.execute(
         select(UnderwritingRun)
         .where(UnderwritingRun.application_id == application_id)

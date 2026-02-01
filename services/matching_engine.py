@@ -1,28 +1,14 @@
 """
 Evaluates a loan application against lender program criteria.
 Produces eligibility, fit score, best program, rejection reasons, and per-criterion results.
+All inputs are normalized to snake_case at entry; internal logic uses snake_case only.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from schemas.lender import CriterionResultSchema, LenderMatchResultSchema
-from schemas.application import (
-    BusinessSchema,
-    GuarantorSchema,
-    BusinessCreditSchema,
-    LoanRequestSchema,
-)
-
-
-def _get(d: dict[str, Any], key: str, default: Any = None) -> Any:
-    """Get value supporting both snake_case and camelCase."""
-    if key in d:
-        return d[key]
-    # camelCase
-    parts = key.split("_")
-    camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
-    return d.get(camel, default)
+from utils.case import dict_keys_to_snake
 
 
 def evaluate_application(
@@ -37,7 +23,14 @@ def evaluate_application(
     """
     Evaluate application against all programs of one lender.
     Returns the best eligible program (highest fit score) or ineligible with reasons.
+    Accepts business/guarantor/loan_request/criteria in either snake_case or camelCase; normalizes to snake_case.
     """
+    business = dict_keys_to_snake(business) if business else {}
+    guarantor = dict_keys_to_snake(guarantor) if guarantor else {}
+    business_credit = dict_keys_to_snake(business_credit) if business_credit else None
+    loan_request = dict_keys_to_snake(loan_request) if loan_request else {}
+    programs = [dict_keys_to_snake({**p, "criteria": p.get("criteria") or {}}) for p in programs]
+
     best: LenderMatchResultSchema | None = None
     all_rejection_reasons: list[str] = []
 
@@ -93,18 +86,17 @@ def _evaluate_program(
     rejection_reasons: list[str] = []
     score_components: list[float] = []
 
-    # FICO
-    fico = _get(guarantor, "fico_score") or _get(guarantor, "ficoScore")
+    fico = guarantor.get("fico_score")
     if fico is None:
         fico = 0
     fico_crit = criteria.get("fico")
     if fico_crit:
-        min_fico = fico_crit.get("min_score") or fico_crit.get("minScore")
-        max_fico = fico_crit.get("max_score") or fico_crit.get("maxScore")
+        min_fico = fico_crit.get("min_score")
+        max_fico = fico_crit.get("max_score")
         tiered = fico_crit.get("tiered")
         if tiered:
-            met = any((t.get("min_score") or t.get("minScore") or 0) <= fico for t in tiered)
-            req_str = "; ".join(f"≥{t.get('min_score') or t.get('minScore')}" for t in tiered)
+            met = any((t.get("min_score") or 0) <= fico for t in tiered)
+            req_str = "; ".join(f"≥{t.get('min_score')}" for t in tiered)
         else:
             met = (min_fico is None or fico >= min_fico) and (max_fico is None or fico <= max_fico)
             req_str = f"≥ {min_fico}" if min_fico is not None else ""
@@ -123,14 +115,11 @@ def _evaluate_program(
         if not met:
             rejection_reasons.append(f"FICO score {fico} below minimum required {min_fico}")
 
-    # PayNet
-    paynet = None
-    if business_credit:
-        paynet = _get(business_credit, "paynet_score") or _get(business_credit, "paynetScore")
+    paynet = business_credit.get("paynet_score") if business_credit else None
     paynet_crit = criteria.get("paynet")
     if paynet_crit and paynet is not None:
-        min_paynet = paynet_crit.get("min_score") or paynet_crit.get("minScore")
-        max_paynet = paynet_crit.get("max_score") or paynet_crit.get("maxScore")
+        min_paynet = paynet_crit.get("min_score")
+        max_paynet = paynet_crit.get("max_score")
         met = (min_paynet is None or paynet >= min_paynet) and (max_paynet is None or paynet <= max_paynet)
         req_str = (f"≥ {min_paynet}" if min_paynet is not None else "") + (f", ≤ {max_paynet}" if max_paynet is not None else "")
         criteria_results.append(
@@ -152,11 +141,10 @@ def _evaluate_program(
         rejection_reasons.append("PayNet score not provided")
         score_components.append(0.0)
 
-    # Loan amount
-    amount = _get(loan_request, "amount") or 0
-    loan_amt = criteria.get("loan_amount") or criteria.get("loanAmount") or {}
-    min_amt = loan_amt.get("min_amount") or loan_amt.get("minAmount") or 0
-    max_amt = loan_amt.get("max_amount") or loan_amt.get("maxAmount") or 0
+    amount = loan_request.get("amount") or 0
+    loan_amt = criteria.get("loan_amount") or {}
+    min_amt = loan_amt.get("min_amount") or 0
+    max_amt = loan_amt.get("max_amount") or 0
     met = min_amt <= amount <= max_amt
     criteria_results.append(
         CriterionResultSchema(
@@ -171,13 +159,12 @@ def _evaluate_program(
     if not met:
         rejection_reasons.append(f"Loan amount ${amount:,} outside range ${min_amt:,}–${max_amt:,}")
 
-    # Time in business
-    yib = _get(business, "years_in_business") or _get(business, "yearsInBusiness")
+    yib = business.get("years_in_business")
     if yib is None:
         yib = 0
-    tib_crit = criteria.get("time_in_business") or criteria.get("timeInBusiness")
+    tib_crit = criteria.get("time_in_business")
     if tib_crit:
-        min_years = tib_crit.get("min_years") or tib_crit.get("minYears") or 0
+        min_years = tib_crit.get("min_years") or 0
         met = yib >= min_years
         criteria_results.append(
             CriterionResultSchema(
@@ -192,12 +179,11 @@ def _evaluate_program(
         if not met:
             rejection_reasons.append(f"Time in business {yib} years below minimum {min_years}")
 
-    # Geographic
-    state = _get(business, "state") or ""
+    state = business.get("state") or ""
     geo = criteria.get("geographic")
     if geo:
-        allowed = geo.get("allowed_states") or geo.get("allowedStates") or []
-        excluded = geo.get("excluded_states") or geo.get("excludedStates") or []
+        allowed = geo.get("allowed_states") or []
+        excluded = geo.get("excluded_states") or []
         if allowed:
             met = state in allowed
             criteria_results.append(
@@ -225,12 +211,11 @@ def _evaluate_program(
             if not met:
                 rejection_reasons.append(f"Geographic restriction: state {state}")
 
-    # Industry
-    industry = _get(business, "industry") or ""
+    industry = business.get("industry") or ""
     ind_crit = criteria.get("industry")
     if ind_crit:
-        excluded = ind_crit.get("excluded_industries") or ind_crit.get("excludedIndustries") or []
-        allowed = ind_crit.get("allowed_industries") or ind_crit.get("allowedIndustries") or []
+        excluded = ind_crit.get("excluded_industries") or []
+        allowed = ind_crit.get("allowed_industries") or []
         if excluded:
             met = industry not in excluded
             criteria_results.append(
@@ -258,15 +243,14 @@ def _evaluate_program(
             if not met:
                 rejection_reasons.append(f"Industry {industry} not permitted")
 
-    # Equipment
-    equip = _get(loan_request, "equipment") or {}
+    equip = loan_request.get("equipment") or {}
     equip_type = equip.get("type") or ""
-    equip_age = equip.get("age_years") or equip.get("ageYears")
+    equip_age = equip.get("age_years")
     equip_crit = criteria.get("equipment")
     if equip_crit:
-        max_age = equip_crit.get("max_equipment_age_years") or equip_crit.get("maxEquipmentAgeYears")
-        excluded = equip_crit.get("excluded_types") or equip_crit.get("excludedTypes") or []
-        allowed = equip_crit.get("allowed_types") or equip_crit.get("allowedTypes") or []
+        max_age = equip_crit.get("max_equipment_age_years")
+        excluded = equip_crit.get("excluded_types") or []
+        allowed = equip_crit.get("allowed_types") or []
         met = True
         if excluded and equip_type in excluded:
             met = False
@@ -289,9 +273,8 @@ def _evaluate_program(
         )
         score_components.append(100.0 if met else 0.0)
 
-    # Min revenue
-    revenue = _get(business, "annual_revenue") or _get(business, "annualRevenue") or 0
-    min_rev = criteria.get("min_revenue") or criteria.get("minRevenue")
+    revenue = business.get("annual_revenue") or 0
+    min_rev = criteria.get("min_revenue")
     if min_rev is not None:
         met = revenue >= min_rev
         criteria_results.append(
@@ -307,7 +290,6 @@ def _evaluate_program(
         if not met:
             rejection_reasons.append(f"Revenue ${revenue:,} below minimum ${min_rev:,}")
 
-    # Fit score: average of criteria that were evaluated
     fit_score = int(sum(score_components) / len(score_components)) if score_components else 0
     eligible = len(rejection_reasons) == 0
 

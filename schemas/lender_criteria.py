@@ -87,11 +87,5 @@ class LenderPolicyCriteriaSchema(BaseModel):
 
 def snake_case_dict(obj: Any) -> Any:
     """Recursively convert dict keys from camelCase to snake_case. For API input normalization."""
-    import re
-    def to_snake(s: str) -> str:
-        return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
-    if isinstance(obj, dict):
-        return {to_snake(k): snake_case_dict(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [snake_case_dict(x) for x in obj]
-    return obj
+    from utils.case import dict_keys_to_snake
+    return dict_keys_to_snake(obj)

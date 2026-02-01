@@ -16,9 +16,9 @@ pydantic-settings==2.6.1
 pdfplumber==0.11.4
 pypdf==5.1.0
 
-# LLM extraction (optional - free tiers)
-# Get keys: Groq https://console.groq.com | Gemini https://aistudio.google.com/apikey
-groq>=0.4.0
+# LLM extraction (optional)
+# Get keys: OpenAI https://platform.openai.com/api-keys | Gemini https://aistudio.google.com/apikey
+openai>=1.0.0
 google-generativeai>=0.3.0
 
 # Utilities

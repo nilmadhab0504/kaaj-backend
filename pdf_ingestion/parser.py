@@ -24,27 +24,29 @@ try:
 except ImportError:
     pdfplumber = None  # type: ignore
 
-# US state codes for geographic extraction
-US_STATE_CODES = {
+US_STATE_CODES = frozenset({
     "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id", "il", "in", "ia",
     "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
     "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt",
     "va", "wa", "wv", "wi", "wy", "dc",
-}
+})
 
-#
-# --- Optional LLM extraction (Gemini first, Groq fallback) ---
-#
+_KEYWORD_PATTERN = re.compile(
+    r"(tier\s*\d+|a\+?\s*rates|b\s*rates|c\s*rates|rate guidelines|guidelines|"
+    r"fico|credit score|paynet|tib|time in business|years in business|"
+    r"\$|net financed|app-only|all in|"
+    r"excluded|restriction|does not lend|california|state|industry|equipment|max age|collateral|"
+    r"revenue|sales|citizen|bankruptcy|tax lien|homeownership|trucking)",
+    re.IGNORECASE,
+)
 
 LLM_MAX_INPUT_CHARS = 24_000
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-# Simple in-process cache so repeated parses of same PDF text
-# don't re-bill / re-hit provider rate limits.
 _LLM_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _LLM_CACHE_MAX = 32
-_LLM_CACHE_TTL_SECONDS = 60 * 30  # 30 minutes
+_LLM_CACHE_TTL_SECONDS = 60 * 30
 
 LLM_EXTRACTION_PROMPT = """You are extracting lender underwriting criteria from equipment finance guideline PDFs.
 
@@ -137,7 +139,6 @@ def _cache_get(key: str) -> Optional[list[dict[str, Any]]]:
 
 
 def _cache_put(key: str, value: list[dict[str, Any]]) -> None:
-    # Evict oldest if needed
     if len(_LLM_CACHE) >= _LLM_CACHE_MAX:
         oldest_key = min(_LLM_CACHE.items(), key=lambda kv: kv[1][0])[0]
         _LLM_CACHE.pop(oldest_key, None)
@@ -149,13 +150,8 @@ def _hash_text(text: str) -> str:
 
 
 def _prepare_text_for_llm(text: str) -> str:
-    """
-    Condense raw PDF text into a high-signal subset while preserving tables/structure.
-    This improves extraction quality and reduces token use.
-    """
-    # Normalize newlines & collapse excessive whitespace but keep line boundaries
+    """Condense raw PDF text into a high-signal subset while preserving tables/structure."""
     raw_lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-    # Drop obvious page markers often produced by pdf text extraction
     cleaned_lines: list[str] = []
     seen = set()
     for ln in raw_lines:
@@ -166,35 +162,23 @@ def _prepare_text_for_llm(text: str) -> str:
         if re.fullmatch(r"--\s*\d+\s*of\s*\d+\s*--", s, flags=re.IGNORECASE):
             continue
         if s.lower().startswith("subject to credit approval"):
-            # Usually boilerplate repeated verbatim
             continue
-        # De-dupe exact repeated lines (common in some extracted PDFs)
         if s in seen:
             continue
         seen.add(s)
         cleaned_lines.append(s)
 
-    # Keyword-focused selection (plus a small window around matches)
-    kw = re.compile(
-        r"(tier\s*\d+|a\+?\s*rates|b\s*rates|c\s*rates|rate guidelines|guidelines|"
-        r"fico|credit score|paynet|tib|time in business|years in business|"
-        r"\$|net financed|app-only|all in|"
-        r"excluded|restriction|does not lend|california|state|industry|equipment|max age|collateral|"
-        r"revenue|sales|citizen|bankruptcy|tax lien|homeownership|trucking)",
-        re.IGNORECASE,
-    )
     keep: list[str] = []
     window = 2
     for i, ln in enumerate(cleaned_lines):
-        if kw.search(ln):
+        if _KEYWORD_PATTERN.search(ln):
             start = max(0, i - window)
             end = min(len(cleaned_lines), i + window + 1)
             for j in range(start, end):
                 keep.append(cleaned_lines[j])
 
-    # Always include some header + tail context
-    head = "\n".join([l for l in cleaned_lines[:120] if l is not None])
-    tail = "\n".join([l for l in cleaned_lines[-120:] if l is not None])
+    head = "\n".join(cleaned_lines[:120])
+    tail = "\n".join(cleaned_lines[-120:])
     mid = "\n".join(keep)
 
     combined = "\n\n".join([head, mid, tail]).strip()
@@ -225,16 +209,16 @@ def _llm_call_gemini(text: str) -> str | None:
         return None
 
 
-def _llm_call_groq(text: str) -> str | None:
-    api_key = os.environ.get("GROQ_API_KEY")
+def _llm_call_openai(text: str) -> str | None:
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
     try:
-        from groq import Groq
+        from openai import OpenAI
 
-        client = Groq(api_key=api_key)
+        client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "You extract structured data from documents. Respond only with valid JSON."},
                 {"role": "user", "content": f"{LLM_EXTRACTION_PROMPT}\n\n---\n\nDocument text:\n\n{text}"},
@@ -256,10 +240,8 @@ def _llm_parse_response(raw: str) -> list[dict[str, Any]] | None:
         m = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)
         if m:
             cleaned = m.group(1).strip()
-    # If model added any leading/trailing text, attempt to extract the JSON object
     if not cleaned.startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
+        start, end = cleaned.find("{"), cleaned.rfind("}")
         if start != -1 and end != -1 and end > start:
             cleaned = cleaned[start : end + 1].strip()
     try:
@@ -310,7 +292,7 @@ def _llm_normalize_programs(programs: list[dict[str, Any]]) -> list[dict[str, An
 
 def _extract_programs_with_llm(text: str) -> list[dict[str, Any]] | None:
     """
-    LLM path (Gemini first, Groq fallback) with caching and condensed context.
+    LLM path (Gemini first, OpenAI fallback) with caching and condensed context.
     Returns normalized list[{name,tier,criteria}] or None.
     """
     cache_key = _hash_text(text)
@@ -319,11 +301,9 @@ def _extract_programs_with_llm(text: str) -> list[dict[str, Any]] | None:
         return cached
 
     prepared = _prepare_text_for_llm(text)
-
-    # Per request: Gemini first, Groq fallback
     raw = _llm_call_gemini(prepared)
     if raw is None:
-        raw = _llm_call_groq(prepared)
+        raw = _llm_call_openai(prepared)
     if raw is None:
         return None
     programs = _llm_parse_response(raw)
@@ -374,8 +354,6 @@ def _extract_fico(text: str) -> dict[str, Any] | None:
     if "fico" not in lower and "credit score" not in lower and "minimum score" not in lower:
         return None
     lines = text.split("\n")
-
-    # First: extract numbers adjacent to "FICO" token
     near: list[int] = []
     for line in lines:
         ll = line.lower()
@@ -391,8 +369,6 @@ def _extract_fico(text: str) -> dict[str, Any] | None:
                 near.append(n)
     if near:
         return {"min_score": min(near), "max_score": max(near) if len(near) > 1 else None}
-
-    # Fallback: any score-like numbers in lines mentioning FICO/score
     fico_lines = " ".join(
         L for L in lines
         if "fico" in L.lower() or "credit score" in L.lower() or "min score" in L.lower() or "minimum score" in L.lower()
@@ -418,11 +394,6 @@ def _extract_paynet(text: str) -> dict[str, Any] | None:
     lines = text.split("\n")
     paynet_lines = " ".join(L for L in lines if "paynet" in L.lower() or "pay net" in L.lower())
     search = paynet_lines or lower
-
-    # Prefer numbers adjacent to "paynet"/"pay net" to avoid mixing with FICO on same line.
-    # IMPORTANT: In many bullets the pattern is "650+ PayNet, 670+ FICO".
-    # We therefore prioritize "number BEFORE paynet" matches; only use "after paynet"
-    # matches when no "before" matches exist.
     before: list[int] = []
     after: list[int] = []
     for line in lines:
@@ -439,8 +410,6 @@ def _extract_paynet(text: str) -> dict[str, Any] | None:
     nums = [n for n in near_raw if 0 <= n <= 100]
     if nums:
         return {"min_score": min(nums), "max_score": max(nums) if len(nums) > 1 else None}
-
-    # Fallback: sometimes PayNet appears as 660/685/700 in extracted text; try converting /10 (floor)
     nums_3 = [n for n in near_raw if 600 <= n <= 799]
     if not nums_3:
         nums_3 = _find_numbers_in_range(search, 600, 799)
@@ -455,7 +424,6 @@ def _extract_paynet(text: str) -> dict[str, Any] | None:
 def _extract_loan_amounts(text: str) -> dict[str, Any] | None:
     """Extract min/max loan amount. Look for $ amounts, 'loan size', 'ticket', 'min'/'max' with numbers/K/M."""
     lower = text.lower()
-    # Dollar amounts: $75,000 or 75K or 1M
     dollar_pattern = r"\$?\s*([\d,]+(?:\.[\d]+)?)\s*(K|M|MM)?\b"
     matches = list(re.finditer(dollar_pattern, text, re.IGNORECASE))
     amounts: list[int] = []
@@ -472,7 +440,6 @@ def _extract_loan_amounts(text: str) -> dict[str, Any] | None:
                 amounts.append(int(val))
         except ValueError:
             pass
-    # Also look for "min" / "max" with numbers on same or next line
     min_max_pattern = r"(?:min(?:imum)?|max(?:imum)?)\s*[:\s]*\$?\s*([\d,]+)\s*(K|M)?"
     for m in re.finditer(min_max_pattern, lower, re.IGNORECASE):
         try:
@@ -485,7 +452,6 @@ def _extract_loan_amounts(text: str) -> dict[str, Any] | None:
             pass
     if not amounts:
         return None
-    # If phrasing suggests a cap ("up to"), treat as max-only
     if len(amounts) == 1 and ("up to" in lower or "≤" in text):
         return {"min_amount": 0, "max_amount": amounts[0]}
     return {"min_amount": min(amounts), "max_amount": max(amounts)}
@@ -513,14 +479,11 @@ def _extract_time_in_business(text: str) -> dict[str, Any] | None:
 
 def _extract_geographic(text: str) -> dict[str, Any] | None:
     """Extract allowed/excluded states. Look for 2-letter state codes and context (excluded, approved, etc.)."""
-    # Find phrases like "excluded states", "no [state]", "approved states", "states: CA, TX"
     excluded: list[str] = []
     allowed: list[str] = []
-    # Two-letter state codes in text (standalone or in lists)
     for m in re.finditer(r"\b([A-Za-z]{2})\b", text):
         code = m.group(1).lower()
         if code in US_STATE_CODES:
-            # Context: check surrounding words
             start = max(0, m.start() - 80)
             end = min(len(text), m.end() + 80)
             context = text[start:end].lower()
@@ -545,23 +508,18 @@ def _extract_industry(text: str) -> dict[str, Any] | None:
     lower = text.lower()
     excluded: list[str] = []
     allowed: list[str] = []
-    # Common exclusions in equipment finance
     if "trucking" in lower or "over-the-road" in lower:
         excluded.append("Trucking")
     if "truck" in lower and "equipment" not in lower and "Trucking" not in excluded:
         excluded.append("Trucking")
-    # Phrases like "excluded industries", "restricted industries"
     excluded_phrases = ["excluded industr", "restricted industr", "ineligible industr", "no trucking"]
     for phrase in excluded_phrases:
         if phrase in lower:
-            # Try to find industry names on same line
             for line in text.split("\n"):
                 if phrase[:10] in line.lower():
-                    # Simple: add known ones
                     if "trucking" in line.lower() and "Trucking" not in excluded:
                         excluded.append("Trucking")
     if "allowed industr" in lower or "approved industr" in lower:
-        # Could parse list; for now leave allowed empty if we only found excluded
         pass
     if not excluded and not allowed:
         return None
@@ -577,7 +535,6 @@ def _extract_equipment(text: str) -> dict[str, Any] | None:
     """Extract equipment restrictions: allowed/excluded types, max equipment age."""
     out: dict[str, Any] = {}
     lower = text.lower()
-    # Max equipment age: "max age", "equipment age", "years old" + number
     age_patterns = [
         r"max(?:imum)?\s*(?:equipment)?\s*age\s*[:\s]*(\d+)\s*years?",
         r"equipment\s*(?:max)?\s*age\s*[:\s]*(\d+)",
@@ -593,12 +550,10 @@ def _extract_equipment(text: str) -> dict[str, Any] | None:
                     break
             except (ValueError, IndexError):
                 pass
-    # Excluded equipment types: "no semi", "excluded: ...", "truck chassis"
     excluded_types: list[str] = []
     if "excluded equipment" in lower or "ineligible equipment" in lower:
         for line in text.split("\n"):
             if "excluded" in line.lower() or "ineligible" in line.lower():
-                # Simple: split on comma and take capitalized words
                 for part in re.split(r"[,;]", line):
                     word = part.strip()
                     if len(word) > 2 and word[0].isupper():
@@ -617,7 +572,6 @@ def _extract_min_revenue(text: str) -> int | None:
     lower = text.lower()
     if "revenue" not in lower and "sales" not in lower:
         return None
-    # Patterns: "min revenue $500,000", "annual revenue of at least..."
     patterns = [
         r"(?:min(?:imum)?|annual)\s*revenue\s*[:\s]*\$?\s*([\d,]+)\s*(K|M)?",
         r"revenue\s*(?:of\s*)?(?:at\s*least|minimum)\s*\$?\s*([\d,]+)\s*(K|M)?",
@@ -659,7 +613,6 @@ def _extract_tier_table_programs(text: str) -> list[dict[str, Any]] | None:
     def default_program(tier: str, suffix: str | None = None) -> dict[str, Any]:
         name = f"Tier {tier}" + (f" ({suffix})" if suffix else "")
         crit: dict[str, Any] = {"loan_amount": global_crit.get("loan_amount", {"min_amount": 5000, "max_amount": 500_000})}
-        # Carry global restrictions if present
         for k in ("geographic", "industry", "equipment", "min_revenue"):
             if global_crit.get(k) is not None:
                 crit[k] = global_crit[k]
@@ -692,8 +645,6 @@ def _extract_tier_table_programs(text: str) -> list[dict[str, Any]] | None:
                 tiers.append(t)
         if len(tiers) < 2:
             continue
-
-        # Look back for conditional context ("If no Paynet", "Corp only")
         ctx = " ".join(lines[max(0, i - 3) : i]).lower()
         suffix = None
         if "no paynet" in ctx:
@@ -703,8 +654,6 @@ def _extract_tier_table_programs(text: str) -> list[dict[str, Any]] | None:
 
         for t in tiers:
             programs.setdefault(t, default_program(t, suffix=suffix))
-
-        # Parse a small window after the header for FICO/TIB/PayNet rows
         j = i + 1
         while j < len(lines) and j < i + 12:
             row = lines[j]
@@ -728,7 +677,6 @@ def _extract_tier_table_programs(text: str) -> list[dict[str, Any]] | None:
             j += 1
 
     if len(programs) >= 2:
-        # Only return if we actually extracted something besides loan_amount
         extracted_any = any(
             any(k in p["criteria"] for k in ("fico", "paynet", "time_in_business"))
             for p in programs.values()
@@ -746,7 +694,6 @@ def _extract_rate_guideline_programs(text: str) -> list[dict[str, Any]] | None:
       C Rate Guidelines - ...
     Returns None if not found.
     """
-    # Use multiline anchors (text extraction usually preserves line breaks around headings)
     pattern = re.compile(r"(?im)^\s*([A-D](?:\+)?)\s*Rate Guidelines\b.*$", re.IGNORECASE)
     matches = list(pattern.finditer(text))
     if len(matches) < 2:
@@ -760,9 +707,7 @@ def _extract_rate_guideline_programs(text: str) -> list[dict[str, Any]] | None:
         start = m.start()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         section = text[start:end]
-
         crit = _extract_criteria_from_section(section)
-        # Merge global restrictions into each grade program
         for k in ("geographic", "industry", "equipment", "min_revenue"):
             if crit.get(k) is None and global_crit.get(k) is not None:
                 crit[k] = global_crit[k]
@@ -777,7 +722,6 @@ def _split_into_tier_sections(text: str) -> list[tuple[str, str]]:
     Split text into (program_name, section_text) pairs by detecting tier/program headers.
     Returns list of (name, text) e.g. [("Tier 1", "FICO 680+ ..."), ("Tier 2", "FICO 650+ ...")].
     """
-    # Find all tier/program header positions: "Tier 1", "Tier 2", "Program A", "Credit Box 1", "Level 1"
     header_pattern = re.compile(
         r"(?:^|\n)\s*"
         r"((?:Tier|TIER)\s*(\d+)|(?:Program|PROGRAM)\s+([A-Za-z])|(?:Credit\s+Box|CreditBox)\s*(\d+)|(?:Level|LEVEL)\s*(\d+))"
@@ -847,7 +791,7 @@ def parse_lender_programs_from_text(text: str, use_llm: bool = True) -> list[dic
     """
     Parse full text from a lender guideline PDF into a list of programs (tiers).
     Each program has: name, tier, criteria.
-    When use_llm=True and GROQ_API_KEY or GEMINI_API_KEY is set, uses LLM for extraction (more accurate).
+    When use_llm=True and OPENAI_API_KEY or GEMINI_API_KEY is set, uses LLM for extraction (more accurate).
     Otherwise falls back to regex-based parsing.
     """
     if use_llm:
@@ -856,10 +800,8 @@ def parse_lender_programs_from_text(text: str, use_llm: bool = True) -> list[dic
             if programs:
                 return programs
         except Exception:
-            # Any LLM failure falls back to deterministic regex parsing
             pass
 
-    # Deterministic (non-LLM) fast paths for common PDF structures
     tier_table_programs = _extract_tier_table_programs(text)
     if tier_table_programs:
         return tier_table_programs
@@ -870,16 +812,12 @@ def parse_lender_programs_from_text(text: str, use_llm: bool = True) -> list[dic
 
     sections = _split_into_tier_sections(text)
     if not sections:
-        # No tier sections found: treat whole text as one program
         criteria = _extract_criteria_from_section(text)
         return [{"name": "Standard Program", "tier": None, "criteria": criteria}]
-
-    # Extract tier-specific criteria from each section; merge with global defaults
     global_criteria = _extract_criteria_from_section(text)
     programs: list[dict[str, Any]] = []
     for name, section_text in sections:
         section_criteria = _extract_criteria_from_section(section_text)
-        # Merge: section overrides, global fills gaps
         merged: dict[str, Any] = {}
         for key in ("geographic", "industry", "equipment", "min_revenue"):
             val = section_criteria.get(key) or global_criteria.get(key)
@@ -891,7 +829,6 @@ def parse_lender_programs_from_text(text: str, use_llm: bool = True) -> list[dic
                 merged[key] = val
         if "loan_amount" not in merged or not merged["loan_amount"].get("min_amount"):
             merged["loan_amount"] = global_criteria.get("loan_amount", {"min_amount": 5000, "max_amount": 500_000})
-        # Extract tier label from name (e.g. "Tier 1" -> "1", "Program A" -> "A")
         tier_m = re.search(r"(?:Tier|Level)\s*(\d+)|(?:Program)\s+([A-Za-z])", name, re.IGNORECASE)
         tier_val = None
         if tier_m:
@@ -933,7 +870,7 @@ def parse_lender_programs_from_pdf(
     """
     Extract text from PDF and parse into a list of programs (tiers).
     Each item: {"name": str, "tier": str|None, "criteria": dict}.
-    Uses LLM (Groq/Gemini free tier) when API keys are set; otherwise regex parsing.
+    Uses LLM (OpenAI/Gemini free tier) when API keys are set; otherwise regex parsing.
     """
     text = extract_text(pdf_path)
     return parse_lender_programs_from_text(text, use_llm=use_llm)

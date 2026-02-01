@@ -9,10 +9,8 @@ def _get_engine_kwargs():
     """Return dialect-specific engine options for SQLite vs PostgreSQL."""
     kwargs = {"echo": settings.debug}
     if settings.is_sqlite:
-        # SQLite: use StaticPool to avoid "database is locked" with async
         kwargs["poolclass"] = StaticPool
         kwargs["connect_args"] = {"check_same_thread": False}
-    # PostgreSQL: use default pool (QueuePool)
     return kwargs
 
 
@@ -42,8 +40,6 @@ async def get_db():
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()
 
 
 async def init_db():

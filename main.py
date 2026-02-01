@@ -14,7 +14,6 @@ from api.underwriting import router as underwriting_router
 async def lifespan(app: FastAPI):
     await init_db()
     yield
-    # shutdown if needed
 
 
 app = FastAPI(
