@@ -1,0 +1,25 @@
+# FastAPI & server
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Validation & settings
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# PDF parsing (for lender guideline ingestion)
+pdfplumber==0.11.4
+pypdf==5.1.0
+
+# LLM extraction (optional - free tiers)
+# Get keys: Groq https://console.groq.com | Gemini https://aistudio.google.com/apikey
+groq>=0.4.0
+google-generativeai>=0.3.0
+
+# Utilities
+python-multipart==0.0.17
