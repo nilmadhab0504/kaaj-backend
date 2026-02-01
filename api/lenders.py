@@ -133,7 +133,10 @@ async def create_lender(body: LenderCreate, db: AsyncSession = Depends(get_db)):
     found = existing.scalar_one_or_none()
     if found:
         if found.slug == body.slug:
-            raise HTTPException(status_code=400, detail="Slug already in use")
+            raise HTTPException(
+                status_code=400,
+                detail="Slug already in use. Use a different slug (e.g. add a number or suffix).",
+            )
         lender_id = f"{lender_id}-{uuid.uuid4().hex[:6]}"
     lender = Lender(
         id=lender_id,
@@ -146,7 +149,10 @@ async def create_lender(body: LenderCreate, db: AsyncSession = Depends(get_db)):
     await db.flush()
     if body.programs:
         for prog_in in body.programs:
-            criteria = _normalize_criteria(prog_in.criteria)
+            try:
+                criteria = _normalize_criteria(prog_in.criteria)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             prog_id = f"{lender_id}-{uuid.uuid4().hex[:8]}"
             prog = LenderProgram(
                 id=prog_id,

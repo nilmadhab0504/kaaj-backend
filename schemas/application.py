@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class BusinessSchema(BaseModel):
@@ -15,6 +15,13 @@ class BusinessSchema(BaseModel):
     entity_type: Optional[str] = Field(None, alias="entityType")
 
     model_config = {"populate_by_name": True}
+
+    @field_validator("industry", "state", mode="before")
+    @classmethod
+    def coerce_str(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v)
 
 
 class GuarantorSchema(BaseModel):
@@ -43,6 +50,13 @@ class EquipmentSchema(BaseModel):
     description: Optional[str] = None
 
     model_config = {"populate_by_name": True}
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def coerce_type_str(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v)
 
 
 class LoanRequestSchema(BaseModel):

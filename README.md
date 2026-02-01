@@ -54,12 +54,6 @@ PDF parsing uses **LLM extraction** (OpenAI or Google Gemini) when API keys are 
    ```
 If both are set, **Gemini is tried first**, then OpenAI.
 
-The following PDFs are referenced for lender policies:
-
-- **Advantage++ Broker 2025.pdf** → Advantage+ Financing (non-trucking up to $75K)
-- **Apex EF Broker Guidelines_082725.pdf** → Apex Commercial Capital
-- **112025 Rates - STANDARD.pdf** → Falcon Equipment Finance
-- **2025 Program Guidelines UPDATED.pdf** → Citizens Bank
 
 To add or update a lender from a new PDF:
 
