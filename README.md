@@ -10,9 +10,9 @@ When the server is running, **OpenAPI (Swagger) docs** are at [http://localhost:
 
 1. **Python 3.11+**
 
-2. Create a virtual environment and install dependencies (recommended):
+2. Create a virtual environment **in this directory** and install dependencies (do not copy `.venv` from another project):
    ```bash
-   cd backend
+   cd kaaj-backend
    python3 -m venv .venv
    source .venv/bin/activate   # On Windows: .venv\Scripts\activate
    pip install -r requirements.txt
@@ -90,7 +90,7 @@ Responses use **camelCase** for frontend compatibility. Full request/response sc
 
 ## Tests
 
-Run matching-engine tests (from `backend/`):
+Run matching-engine tests (from `kaaj-backend/` with venv activated):
 
 ```bash
 python -m unittest tests.test_matching_engine -v
